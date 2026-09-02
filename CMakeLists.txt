@@ -9,19 +9,23 @@ set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# Check for Jack (any OS)
-find_library(JACK_LIB jack)
-find_package(PkgConfig)
-pkg_check_modules(jack jack)
-if(JACK_LIB OR jack_FOUND)
-  set(HAVE_JACK TRUE)
+if(NOT EMSCRIPTEN)
+  # Check for Jack (any OS)
+  find_library(JACK_LIB jack)
+  find_package(PkgConfig)
+  pkg_check_modules(jack jack)
+  if(JACK_LIB OR jack_FOUND)
+    set(HAVE_JACK TRUE)
+  endif()
+
+  # Check for Pulse (any OS)
+  pkg_check_modules(pulse libpulse-simple)
 endif()
 
-# Check for Pulse (any OS)
-pkg_check_modules(pulse libpulse-simple)
-
 # Check for known non-Linux unix-likes
-if (CMAKE_SYSTEM_NAME MATCHES "kNetBSD.*|NetBSD.*")
+if(EMSCRIPTEN)
+  message(STATUS "Emscripten detected, using WebAudio")
+elseif (CMAKE_SYSTEM_NAME MATCHES "kNetBSD.*|NetBSD.*")
   message(STATUS "NetBSD detected, using OSS")
   set(xBSD ON)
 elseif(UNIX AND NOT APPLE)
@@ -35,7 +39,12 @@ if(MINGW)
 endif()
 
 # Standard CMake options
-option(BUILD_SHARED_LIBS "Build as shared library" ON)
+if(EMSCRIPTEN)
+  set(RTAUDIO_DEFAULT_BUILD_SHARED_LIBS OFF)
+else()
+  set(RTAUDIO_DEFAULT_BUILD_SHARED_LIBS ON)
+endif()
+option(BUILD_SHARED_LIBS "Build as shared library" ${RTAUDIO_DEFAULT_BUILD_SHARED_LIBS})
 
 if (NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
   set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "Debug;Release;RelWithDebInfo;MinSizeRel")
@@ -57,7 +66,12 @@ option(RTAUDIO_API_ALSA "Build ALSA API" ${LINUX})
 option(RTAUDIO_API_PULSE "Build PulseAudio API" ${pulse_FOUND})
 option(RTAUDIO_API_JACK "Build JACK audio server API" ${HAVE_JACK})
 option(RTAUDIO_API_CORE "Build CoreAudio API" ${APPLE})
+option(RTAUDIO_API_WEB_AUDIO "Build WebAudio API for Emscripten" ${EMSCRIPTEN})
 option(RTAUDIO_INSTALL "Generate installation target" ON)
+
+if(EMSCRIPTEN AND NOT RTAUDIO_API_WEB_AUDIO)
+  message(FATAL_ERROR "Emscripten builds currently require RTAUDIO_API_WEB_AUDIO=ON")
+endif()
 
 # Check for functions
 include(CheckFunctionExists)
@@ -103,10 +117,16 @@ file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/configure.ac" CONFIGAC
 string(REGEX REPLACE "${R}" "\\1" PACKAGE_VERSION "${CONFIGAC}")
 
 # Init variables
-set(rtaudio_SOURCES RtAudio.cpp RtAudio.h rtaudio_c.cpp rtaudio_c.h)
+if(EMSCRIPTEN)
+  set(rtaudio_SOURCES RtAudioWasm.cpp RtAudioWeb.cpp RtAudioWeb.h RtAudio.h rtaudio_c.cpp rtaudio_c.h)
+else()
+  set(rtaudio_SOURCES RtAudio.cpp RtAudio.h rtaudio_c.cpp rtaudio_c.h)
+endif()
 set(LINKLIBS)
 set(PKGCONFIG_REQUIRES)
 set(LIBS_REQUIRES)
+set(PKGCONFIG_CFLAGS)
+set(PKGCONFIG_LIBS)
 set(API_DEFS)
 set(API_LIST)
 
@@ -203,6 +223,17 @@ if (RTAUDIO_API_WASAPI)
   list(APPEND API_LIST "wasapi")
 endif()
 
+# WebAudio / Emscripten
+if(RTAUDIO_API_WEB_AUDIO)
+  if(NOT EMSCRIPTEN)
+    message(FATAL_ERROR "WebAudio API requires the Emscripten toolchain")
+  endif()
+  list(APPEND API_DEFS "-D__RTAUDIO_WEB_AUDIO__")
+  list(APPEND API_LIST "webaudio")
+  list(APPEND PKGCONFIG_CFLAGS "-sWASM_WORKERS")
+  list(APPEND PKGCONFIG_LIBS "-sAUDIO_WORKLET" "-sWASM_WORKERS" "-pthread")
+endif()
+
 # Windows libs
 if (NEED_WIN32LIBS)
   list(APPEND LINKLIBS winmm ole32)
@@ -284,6 +315,16 @@ target_compile_definitions(rtaudio PRIVATE ${API_DEFS})
 target_compile_definitions(rtaudio PRIVATE RTAUDIO_EXPORT)
 target_link_libraries(rtaudio ${LINKLIBS})
 
+if(EMSCRIPTEN AND RTAUDIO_API_WEB_AUDIO)
+  # AudioWorklets are implemented as Wasm Workers. RtAudio also uses libc++
+  # facilities that depend internally on pthread synchronization (for example
+  # std::call_once), so enable Emscripten's documented hybrid mode. The audio
+  # callback still executes on the dedicated Wasm AudioWorklet thread.
+  target_compile_definitions(rtaudio INTERFACE __RTAUDIO_WEB_AUDIO__)
+  target_compile_options(rtaudio PUBLIC "-sWASM_WORKERS" "-pthread")
+  target_link_options(rtaudio INTERFACE "-sAUDIO_WORKLET" "-sWASM_WORKERS" "-pthread")
+endif()
+
 if(RTAUDIO_BUILD_MODULES)
   if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.28)
     message(STATUS "Building rtaudio C++ module")
@@ -310,6 +351,8 @@ message(STATUS "Compiling with support for: ${apilist}")
 # PkgConfig file
 string(REPLACE ";" " " req "${PKGCONFIG_REQUIRES}")
 string(REPLACE ";" " " req_libs "${LIBS_REQUIRES}")
+string(REPLACE ";" " " pc_cflags "${PKGCONFIG_CFLAGS}")
+string(REPLACE ";" " " pc_libs "${PKGCONFIG_LIBS}")
 string(REPLACE ";" " " api "${API_DEFS}")
 set(prefix ${CMAKE_INSTALL_PREFIX})
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/rtaudio.pc.in" "rtaudio.pc" @ONLY)
@@ -323,8 +366,12 @@ if(RTAUDIO_INSTALL)
           RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
           INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/rtaudio)
 
-  # Install public header files
-  install(FILES RtAudio.h rtaudio_c.h
+  # Install public header files.
+  set(RTAUDIO_PUBLIC_HEADERS RtAudio.h rtaudio_c.h)
+  if(EMSCRIPTEN)
+    list(APPEND RTAUDIO_PUBLIC_HEADERS RtAudioWeb.h)
+  endif()
+  install(FILES ${RTAUDIO_PUBLIC_HEADERS}
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/rtaudio)
 
   # Store the package in the user registry.

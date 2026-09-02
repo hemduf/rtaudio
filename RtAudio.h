@@ -285,6 +285,9 @@ class RTAUDIO_DLL_PUBLIC RtAudio
     WINDOWS_WASAPI, /*!< The Microsoft WASAPI API. */
     WINDOWS_DS,     /*!< The Microsoft DirectSound API. */
     RTAUDIO_DUMMY,  /*!< A compilable but non-functional API. */
+#if defined(__EMSCRIPTEN__)
+    WEB_AUDIO,      /*!< Web Audio API via Emscripten Wasm AudioWorklet. */
+#endif
     NUM_APIS        /*!< Number of values in this enum. */
   };
 
@@ -474,8 +477,7 @@ class RTAUDIO_DLL_PUBLIC RtAudio
     This function performs a system query of available devices each
     time it is called, thus supporting devices (dis)connected \e after
     instantiation. If no devices are available, the vector size will
-    be zero. If a system error occurs during processing, a warning
-    will be issued.
+    be zero. If a system error occurs during processing, a warning will be issued.
   */
   std::vector<std::string> getDeviceNames( void );
 

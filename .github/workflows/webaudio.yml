@@ -1,0 +1,316 @@
+name: WebAudio WASM CI
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - CMakeLists.txt
+      - README.md
+      - RtAudio.h
+      - RtAudioWasm.cpp
+      - RtAudioWeb.cpp
+      - RtAudioWeb.h
+      - WEBAUDIO.md
+      - rtaudio.pc.in
+      - rtaudio_c.cpp
+      - rtaudio_c.h
+      - tests/**
+      - .github/workflows/webaudio.yml
+  push:
+    branches: [master]
+    paths:
+      - CMakeLists.txt
+      - README.md
+      - RtAudio.h
+      - RtAudioWasm.cpp
+      - RtAudioWeb.cpp
+      - RtAudioWeb.h
+      - WEBAUDIO.md
+      - rtaudio.pc.in
+      - rtaudio_c.cpp
+      - rtaudio_c.h
+      - tests/**
+      - .github/workflows/webaudio.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: webaudio-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  EMSCRIPTEN_VERSION: 6.0.5
+
+jobs:
+  webaudio:
+    name: Emscripten WebAudio
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Emscripten
+        uses: emscripten-core/setup-emsdk@v15
+        with:
+          version: ${{ env.EMSCRIPTEN_VERSION }}
+          actions-cache-folder: emsdk-cache
+
+      - name: Verify toolchain
+        run: |
+          emcc --version
+          em++ --version
+          node --version
+          python3 --version
+          cmake --version
+          ninja --version
+
+      - name: Validate development server helper
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile tests/webaudio_server.py
+          python3 tests/webaudio_server.py --help >/dev/null
+
+          python3 tests/webaudio_server.py tests --port 8765 >server.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+
+          for _ in $(seq 1 20); do
+            if curl --silent --fail --head http://127.0.0.1:8765/webaudio_playsaw.html >headers.txt; then
+              break
+            fi
+            sleep 0.1
+          done
+
+          grep -Fiq 'Cross-Origin-Opener-Policy: same-origin' headers.txt
+          grep -Fiq 'Cross-Origin-Embedder-Policy: require-corp' headers.txt
+          grep -Fiq 'Cross-Origin-Resource-Policy: same-origin' headers.txt
+          grep -Fiq 'Cache-Control: no-store' headers.txt
+
+      - name: Reject Emscripten without WebAudio
+        shell: bash
+        run: |
+          set -euo pipefail
+          if emcmake cmake -S . -B build-wasm-disabled -G Ninja \
+              -DRTAUDIO_API_WEB_AUDIO=OFF \
+              -DRTAUDIO_BUILD_TESTING=OFF \
+              -DRTAUDIO_INSTALL=OFF; then
+            echo "Emscripten configuration unexpectedly succeeded without WebAudio" >&2
+            exit 1
+          fi
+
+      - name: Configure WebAudio build
+        run: |
+          emcmake cmake -S . -B build-wasm -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="${GITHUB_WORKSPACE}/build-wasm/install" \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DRTAUDIO_API_WEB_AUDIO=ON \
+            -DRTAUDIO_BUILD_TESTING=ON \
+            -DRTAUDIO_INSTALL=ON
+
+          grep -Fq 'RTAUDIO_API_WEB_AUDIO:BOOL=ON' build-wasm/CMakeCache.txt
+          grep -Fq -- '-sAUDIO_WORKLET' build-wasm/build.ninja
+          grep -Fq -- '-sWASM_WORKERS' build-wasm/build.ninja
+          grep -Fq -- '-pthread' build-wasm/build.ninja
+          grep -Fq -- '-sEXPORTED_FUNCTIONS=' build-wasm/build.ninja
+          grep -Fq -- '--pre-js' build-wasm/build.ninja
+          grep -Fq 'webaudio_playsaw_graph.js' build-wasm/build.ninja
+          grep -Fq 'webaudio_examples' build-wasm/build.ninja
+
+      - name: Build WebAudio backend, tests and examples
+        run: |
+          cmake --build build-wasm \
+            --target rtaudio webaudio_api webaudio_examples \
+            --verbose
+
+      - name: Run WebAudio API smoke test
+        run: |
+          ctest --test-dir build-wasm \
+            --output-on-failure \
+            -R '^webaudio_api$'
+
+      - name: Validate installed WebAudio package
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake --install build-wasm
+
+          PREFIX="${GITHUB_WORKSPACE}/build-wasm/install"
+          test -s "$PREFIX/include/rtaudio/RtAudio.h"
+          test -s "$PREFIX/include/rtaudio/RtAudioWeb.h"
+          test -s "$PREFIX/include/rtaudio/rtaudio_c.h"
+          grep -Fq 'RTAUDIO_FLAGS_WEB_AUDIO_EXTERNAL_GRAPH' \
+            "$PREFIX/include/rtaudio/rtaudio_c.h"
+
+          PC_FILE="$(find "$PREFIX" -type f -path '*/pkgconfig/rtaudio.pc' -print -quit)"
+          test -n "$PC_FILE"
+          grep -Fq -- '-sWASM_WORKERS' "$PC_FILE"
+          grep -Fq -- '-sAUDIO_WORKLET' "$PC_FILE"
+          grep -Fq -- '-pthread' "$PC_FILE"
+          grep -Fq -- '-D__RTAUDIO_WEB_AUDIO__' "$PC_FILE"
+
+          TARGETS_FILE="$(find "$PREFIX" -type f -name 'RtAudioTargets.cmake' -print -quit)"
+          test -n "$TARGETS_FILE"
+          grep -Fq -- '-sWASM_WORKERS' "$TARGETS_FILE"
+          grep -Fq -- '-sAUDIO_WORKLET' "$TARGETS_FILE"
+          grep -Fq -- '__RTAUDIO_WEB_AUDIO__' "$TARGETS_FILE"
+
+          CONSUMER="${GITHUB_WORKSPACE}/build-wasm/consumer"
+          mkdir -p "$CONSUMER"
+          cat >"$CONSUMER/main.cpp" <<'CPP'
+          #include <RtAudioWeb.h>
+
+          int main()
+          {
+            const RtAudio::Api api = RtAudio::getCompiledApiByName("webaudio");
+            return api != RtAudio::WEB_AUDIO ||
+                   RTAUDIO_WEB_AUDIO_EXTERNAL_GRAPH != 0x40 ? 1 : 0;
+          }
+          CPP
+          cat >"$CONSUMER/CMakeLists.txt" <<'CMAKE'
+          cmake_minimum_required(VERSION 3.13)
+          project(rtaudio_installed_consumer LANGUAGES CXX)
+          find_package(RtAudio CONFIG REQUIRED)
+          add_executable(rtaudio_installed_consumer main.cpp)
+          target_link_libraries(rtaudio_installed_consumer PRIVATE RtAudio::rtaudio)
+          CMAKE
+
+          emcmake cmake -S "$CONSUMER" -B "$CONSUMER/build" -G Ninja \
+            -DRtAudio_DIR="$PREFIX/share/rtaudio" \
+            -DCMAKE_FIND_USE_PACKAGE_REGISTRY=OFF
+          cmake --build "$CONSUMER/build" --verbose
+
+          export PKG_CONFIG_PATH="$(dirname "$PC_FILE")"
+          em++ "$CONSUMER/main.cpp" \
+            $(pkg-config --cflags --libs rtaudio) \
+            -o "$CONSUMER/pkgconfig-consumer.js"
+          test -s "$CONSUMER/pkgconfig-consumer.js"
+
+      - name: Validate realtime lifecycle contract
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          grep -Fq 'waitForActiveCallback' RtAudioWeb.cpp
+          grep -Fq 'streamFrames_' RtAudioWeb.cpp
+          grep -Fq 'emscripten_audio_worklet_post_function_v' RtAudioWeb.cpp
+          grep -Fq 'synchronizeStoppedStreamsOnMainThread' RtAudioWeb.cpp
+          grep -Fq 'stopStream() must be called on the browser main thread' RtAudioWeb.cpp
+          grep -Fq 'abortStream() must be called on the browser main thread' RtAudioWeb.cpp
+          grep -Fq 'return 1 from the callback instead' RtAudioWeb.cpp
+          grep -Fq 'return 2 from the callback instead' RtAudioWeb.cpp
+          grep -Fq 'after the function returns' WEBAUDIO.md
+          grep -Fq 'atomic 64-bit frame counter' WEBAUDIO.md
+
+      - name: Validate external WebAudio graph contract
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          grep -Fq 'RTAUDIO_WEB_AUDIO_EXTERNAL_GRAPH' RtAudioWeb.h
+          grep -Fq 'RTAUDIO_FLAGS_WEB_AUDIO_EXTERNAL_GRAPH' rtaudio_c.h
+          grep -Fq 'RTAUDIO_WEB_AUDIO_EXTERNAL_GRAPH' tests/webaudio_playsaw.cpp
+          grep -Fq 'queueMicrotask' RtAudioWeb.cpp
+          grep -Fq 'retiredHandles_' RtAudioWeb.cpp
+          grep -Fq 'const bool keepAlive = owner != nullptr' RtAudioWeb.cpp
+          grep -Fq 'Keep the AudioWorkletNode and graph alive' tests/webaudio_playsaw.cpp
+          grep -Fq 'Module.RtAudioWeb.onNodeCreated' tests/webaudio_playsaw_graph.js
+          grep -Fq 'Module.RtAudioWeb.onNodeDestroyed' tests/webaudio_playsaw_graph.js
+          grep -Fq "info.name !== 'rtaudio-playsaw'" tests/webaudio_playsaw_graph.js
+          grep -Fq 'node.connect(gain).connect(context.destination)' tests/webaudio_playsaw_graph.js
+          grep -Fq 'graph.gain.disconnect()' tests/webaudio_playsaw_graph.js
+          grep -Fq 'Module.RtAudioWeb.initialize' tests/webaudio_playsaw.html
+          grep -Fq 'Module.RtAudioWeb.getNode' WEBAUDIO.md
+          grep -Fq 'Stream teardown' WEBAUDIO.md
+          grep -Fq 'webaudio_server.py' WEBAUDIO.md
+
+      - name: Validate browser test bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SHELL_HTML=tests/webaudio_playsaw.html
+          HTML=build-wasm/tests/webaudio_playsaw.html
+          JS=build-wasm/tests/webaudio_playsaw.js
+          WASM=build-wasm/tests/webaudio_playsaw.wasm
+
+          test -s "$HTML"
+          test -s "$JS"
+          test -s "$WASM"
+
+          node --check "$JS"
+
+          for pattern in \
+            'Stereo peak meter' \
+            'id="frequency"' \
+            'max="5000"' \
+            'id="gain"' \
+            'id="graph"' \
+            'AudioWorkletNode → GainNode → destination' \
+            'webaudio_server.py' \
+            'crossOriginIsolated'; do
+            grep -Fq "$pattern" "$SHELL_HTML" || {
+              echo "Missing HTML feature: $pattern" >&2
+              exit 1
+            }
+          done
+
+          for symbol in \
+            _rtaudio_web_initialize_context \
+            _rtaudio_webaudio_playsaw_start \
+            _rtaudio_webaudio_playsaw_stop \
+            _rtaudio_webaudio_playsaw_set_frequency \
+            _rtaudio_webaudio_playsaw_set_gain \
+            _rtaudio_webaudio_playsaw_frequency \
+            _rtaudio_webaudio_playsaw_gain \
+            _rtaudio_webaudio_playsaw_meter_left \
+            _rtaudio_webaudio_playsaw_meter_right \
+            _rtaudio_webaudio_playsaw_is_running \
+            _rtaudio_webaudio_playsaw_sample_rate \
+            _rtaudio_webaudio_playsaw_buffer_frames; do
+            grep -Fq "$symbol" "$JS" || {
+              echo "Missing JavaScript Module export: $symbol" >&2
+              exit 1
+            }
+          done
+
+          find build-wasm/tests -maxdepth 1 -type f -name 'webaudio_playsaw*' -print
+
+      - name: Run browser WebAudio integration test
+        shell: bash
+        run: |
+          set -euo pipefail
+          google-chrome --version
+          # Playwright 1.55.x has a Chromium AudioWorklet.addModule() hang.
+          # 1.56 contains the upstream fix and exercises the real browser path.
+          npm install --no-save --ignore-scripts playwright-core@1.56.1
+
+          python3 tests/webaudio_server.py build-wasm/tests --port 8765 \
+            >browser-server.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+
+          for _ in $(seq 1 50); do
+            if curl --silent --fail \
+                http://127.0.0.1:8765/webaudio_playsaw.html >/dev/null; then
+              break
+            fi
+            sleep 0.1
+          done
+
+          RTAUDIO_WEBAUDIO_URL=http://127.0.0.1:8765/webaudio_playsaw.html \
+            node tests/webaudio_browser_test.mjs
+
+      - name: Upload browser test bundle
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: rtaudio-webaudio-playsaw
+          path: build-wasm/tests/webaudio_playsaw*
+          if-no-files-found: warn
+          retention-days: 7

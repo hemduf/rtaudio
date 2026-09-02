@@ -65,6 +65,7 @@ typedef unsigned long rtaudio_format_t;
     - \e RTAUDIO_FLAGS_HOG_DEVICE:       Attempt grab device for exclusive use.
     - \e RTAUDIO_FLAGS_ALSA_USE_DEFAULT: Use the "default" PCM device (ALSA only).
     - \e RTAUDIO_FLAGS_JACK_DONT_CONNECT: Do not automatically connect ports (JACK only).
+    - \e RTAUDIO_FLAGS_WEB_AUDIO_EXTERNAL_GRAPH: Expose the stream as an unconnected Web Audio node (Emscripten only).
 
     See \ref RtAudioStreamFlags.
 */
@@ -76,6 +77,9 @@ typedef unsigned int rtaudio_stream_flags_t;
 #define RTAUDIO_FLAGS_SCHEDULE_REALTIME 0x8
 #define RTAUDIO_FLAGS_ALSA_USE_DEFAULT 0x10
 #define RTAUDIO_FLAGS_JACK_DONT_CONNECT 0x20
+#if defined(__EMSCRIPTEN__)
+#define RTAUDIO_FLAGS_WEB_AUDIO_EXTERNAL_GRAPH 0x40
+#endif
 
 /*! \typedef typedef unsigned long rtaudio_stream_status_t;
     \brief RtAudio stream status (over- or underflow) flags.
@@ -149,6 +153,9 @@ enum rtaudio_api {
   RTAUDIO_API_WINDOWS_WASAPI, /*!< The Microsoft WASAPI API. */
   RTAUDIO_API_WINDOWS_DS,     /*!< The Microsoft DirectSound API. */
   RTAUDIO_API_DUMMY,          /*!< A compilable but non-functional API. */
+#if defined(__EMSCRIPTEN__)
+  RTAUDIO_API_WEB_AUDIO,      /*!< Web Audio API via Emscripten Wasm AudioWorklet. */
+#endif
   RTAUDIO_API_NUM,            /*!< Number of values in this enum. */
 };
 typedef int rtaudio_api_t;
