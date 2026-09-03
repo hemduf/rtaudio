@@ -1,0 +1,467 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RtAudio WebAudio playsaw</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #121212;
+      color: #f3f3f3;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+    }
+
+    main {
+      width: min(680px, calc(100vw - 48px));
+      padding: 32px;
+      border: 1px solid #3a3a3a;
+      border-radius: 12px;
+      background: #1c1c1c;
+    }
+
+    h1 { margin-top: 0; }
+
+    .controls {
+      display: flex;
+      gap: 12px;
+      margin: 24px 0;
+      flex-wrap: wrap;
+    }
+
+    button {
+      min-width: 120px;
+      padding: 12px 18px;
+      border: 1px solid #666;
+      border-radius: 8px;
+      background: #2b2b2b;
+      color: inherit;
+      font: inherit;
+      cursor: pointer;
+    }
+
+    button:disabled {
+      opacity: 0.45;
+      cursor: default;
+    }
+
+    .parameter {
+      display: grid;
+      grid-template-columns: 110px minmax(0, 1fr) 84px;
+      align-items: center;
+      gap: 12px;
+      margin: 16px 0;
+    }
+
+    .parameter output {
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
+
+    input[type="range"] { width: 100%; }
+
+    .meter-panel {
+      margin: 24px 0;
+      padding: 16px;
+      border: 1px solid #343434;
+      border-radius: 8px;
+      background: #171717;
+    }
+
+    .meter-title {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 12px;
+    }
+
+    .meter-title strong { font-size: 0.95rem; }
+
+    .meter-title span {
+      color: #a8a8a8;
+      font-size: 0.8rem;
+    }
+
+    .meter-row {
+      display: grid;
+      grid-template-columns: 24px minmax(0, 1fr) 72px;
+      align-items: center;
+      gap: 10px;
+      margin: 9px 0;
+    }
+
+    .meter-channel {
+      font-weight: 700;
+      text-align: center;
+    }
+
+    .meter-track {
+      position: relative;
+      height: 18px;
+      overflow: hidden;
+      border: 1px solid #444;
+      border-radius: 3px;
+      background:
+        repeating-linear-gradient(
+          90deg,
+          transparent 0,
+          transparent calc(10% - 1px),
+          rgba(255,255,255,0.08) calc(10% - 1px),
+          rgba(255,255,255,0.08) 10%
+        ),
+        #242424;
+    }
+
+    .meter-fill {
+      position: absolute;
+      inset: 0;
+      transform: scaleX(0);
+      transform-origin: left center;
+      background: linear-gradient(90deg, #35b56a 0 72%, #e0b33e 82%, #d65a4a 100%);
+      transition: transform 45ms linear;
+      will-change: transform;
+    }
+
+    .meter-value {
+      text-align: right;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.85rem;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .meter-scale {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      margin: 2px 72px 0 34px;
+      color: #888;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.7rem;
+    }
+
+    .meter-scale span:nth-child(1) { text-align: left; }
+    .meter-scale span:not(:first-child):not(:last-child) { text-align: center; }
+    .meter-scale span:last-child { text-align: right; }
+
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+    #status {
+      min-height: 1.5em;
+      font-weight: 600;
+    }
+
+    #backend,
+    #graph {
+      margin-top: 12px;
+      padding: 12px;
+      border: 1px solid #343434;
+      border-radius: 8px;
+      background: #171717;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.9rem;
+      line-height: 1.5;
+    }
+
+    #isolation {
+      margin-top: 24px;
+      font-size: 0.9rem;
+      color: #c8c8c8;
+    }
+
+    .warning { color: #ffbd66; }
+    .ok { color: #80d49b; }
+
+    @media (max-width: 480px) {
+      main { padding: 22px; }
+
+      .parameter { grid-template-columns: 1fr auto; }
+      .parameter input { grid-column: 1 / -1; }
+
+      .meter-title { display: block; }
+      .meter-title span {
+        display: block;
+        margin-top: 4px;
+      }
+
+      .meter-row {
+        grid-template-columns: 22px minmax(0, 1fr) 64px;
+        gap: 7px;
+      }
+
+      .meter-scale {
+        margin-right: 64px;
+        margin-left: 29px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>RtAudio WebAudio playsaw</h1>
+    <p>
+      Browser equivalent of <code>tests/playsaw.cpp</code>. The page owns the
+      <code>AudioContext</code> and explicitly initializes the RtAudio WebAudio
+      runtime with it before any stream is opened. The left channel plays the
+      selected frequency and the right channel plays 1.5× that value. The
+      sliders demonstrate main-thread → AudioWorklet communication; the stereo
+      meter demonstrates the opposite path. The RtAudio stream is exposed as a
+      real WebAudio node and connected through a browser <code>GainNode</code>.
+    </p>
+
+    <div class="controls">
+      <button id="start" disabled>Start audio</button>
+      <button id="stop" disabled>Stop audio</button>
+    </div>
+
+    <div class="parameter">
+      <label for="frequency">Frequency</label>
+      <input id="frequency" type="range" min="20" max="5000" step="1" value="220" disabled>
+      <output id="frequency-value" for="frequency">220 Hz</output>
+    </div>
+
+    <div class="parameter">
+      <label for="gain">Gain</label>
+      <input id="gain" type="range" min="0" max="1" step="0.01" value="0.25" disabled>
+      <output id="gain-value" for="gain">0.25</output>
+    </div>
+
+    <section class="meter-panel" aria-label="Stereo AudioWorklet peak meter">
+      <div class="meter-title">
+        <strong>Stereo peak meter</strong>
+        <span>AudioWorklet → atomics → WASM getters → JavaScript</span>
+      </div>
+
+      <div class="meter-row">
+        <span class="meter-channel">L</span>
+        <div class="meter-track" role="meter" aria-label="Left channel peak" aria-valuemin="-60" aria-valuemax="0" aria-valuenow="-60">
+          <div id="meter-left-fill" class="meter-fill"></div>
+        </div>
+        <output id="meter-left-value" class="meter-value">−∞ dB</output>
+      </div>
+
+      <div class="meter-row">
+        <span class="meter-channel">R</span>
+        <div class="meter-track" role="meter" aria-label="Right channel peak" aria-valuemin="-60" aria-valuemax="0" aria-valuenow="-60">
+          <div id="meter-right-fill" class="meter-fill"></div>
+        </div>
+        <output id="meter-right-value" class="meter-value">−∞ dB</output>
+      </div>
+
+      <div class="meter-scale" aria-hidden="true">
+        <span>−60</span><span>−36</span><span>−24</span><span>−12</span><span>0 dB</span>
+      </div>
+    </section>
+
+    <div id="status">Loading WebAssembly…</div>
+    <div id="details"></div>
+    <div id="backend">AudioWorklet applied: waiting for runtime</div>
+    <div id="graph">WebAudio graph: waiting for RtAudio node</div>
+    <div id="isolation"></div>
+  </main>
+
+  <script>
+    const startButton = document.getElementById('start');
+    const stopButton = document.getElementById('stop');
+    const frequencySlider = document.getElementById('frequency');
+    const gainSlider = document.getElementById('gain');
+    const frequencyValue = document.getElementById('frequency-value');
+    const gainValue = document.getElementById('gain-value');
+    const meterLeftFill = document.getElementById('meter-left-fill');
+    const meterRightFill = document.getElementById('meter-right-fill');
+    const meterLeftValue = document.getElementById('meter-left-value');
+    const meterRightValue = document.getElementById('meter-right-value');
+    const meterLeftTrack = meterLeftFill.parentElement;
+    const meterRightTrack = meterRightFill.parentElement;
+    const statusElement = document.getElementById('status');
+    const detailsElement = document.getElementById('details');
+    const backendElement = document.getElementById('backend');
+    const graphElement = document.getElementById('graph');
+    const isolationElement = document.getElementById('isolation');
+
+    let runtimeReady = false;
+    let backendPoll = 0;
+    let meterAnimation = 0;
+    let displayedLeft = 0;
+    let displayedRight = 0;
+
+    function setStatus(message, className = '') {
+      statusElement.textContent = message;
+      statusElement.className = className;
+    }
+
+    function updateIsolationStatus() {
+      if (window.crossOriginIsolated) {
+        isolationElement.innerHTML =
+          '<span class="ok">crossOriginIsolated: true</span>';
+      } else {
+        isolationElement.innerHTML =
+          '<span class="warning">crossOriginIsolated: false</span><br>' +
+          'Run <code>python3 tests/webaudio_server.py build-wasm/tests</code> ' +
+          'or configure your server with ' +
+          '<code>Cross-Origin-Opener-Policy: same-origin</code> and ' +
+          '<code>Cross-Origin-Embedder-Policy: require-corp</code>.';
+      }
+    }
+
+    function updateBackendReadout() {
+      if (!runtimeReady) return;
+
+      const frequency = Module._rtaudio_webaudio_playsaw_frequency();
+      const gain = Module._rtaudio_webaudio_playsaw_gain();
+      const running = Module._rtaudio_webaudio_playsaw_is_running() !== 0;
+
+      backendElement.textContent =
+        `AudioWorklet applied: frequency=${frequency.toFixed(1)} Hz, ` +
+        `gain=${gain.toFixed(2)} — ${running ? 'running' : 'stopped'}`;
+
+      const webApi = Module.RtAudioWeb;
+      const graph = webApi && webApi.playsawGraph;
+      if (graph && graph.source && graph.gain) {
+        graphElement.textContent =
+          'WebAudio graph: RtAudio AudioWorkletNode → GainNode → destination';
+        graphElement.className = 'ok';
+      } else {
+        graphElement.textContent =
+          'WebAudio graph: waiting for RtAudio node publication';
+        graphElement.className = '';
+      }
+    }
+
+    function linearToDb(level) {
+      if (!Number.isFinite(level) || level <= 0.001)
+        return -60;
+      return Math.max(-60, Math.min(0, 20 * Math.log10(level)));
+    }
+
+    function renderMeter(fill, valueElement, track, level) {
+      const db = linearToDb(level);
+      const normalized = Math.max(0, Math.min(1, (db + 60) / 60));
+      fill.style.transform = `scaleX(${normalized.toFixed(4)})`;
+      valueElement.textContent = level <= 0.001 ? '−∞ dB' : `${db.toFixed(1)} dB`;
+      track.setAttribute('aria-valuenow', db.toFixed(1));
+    }
+
+    function updateMeters() {
+      if (runtimeReady) {
+        const rawLeft = Module._rtaudio_webaudio_playsaw_meter_left();
+        const rawRight = Module._rtaudio_webaudio_playsaw_meter_right();
+
+        // Instant attack, UI-only decay. The values coming from C++ remain the
+        // raw per-quantum peaks measured on the AudioWorklet thread.
+        displayedLeft = rawLeft >= displayedLeft ? rawLeft : displayedLeft * 0.92;
+        displayedRight = rawRight >= displayedRight ? rawRight : displayedRight * 0.92;
+
+        if (displayedLeft < 0.0005) displayedLeft = 0;
+        if (displayedRight < 0.0005) displayedRight = 0;
+
+        renderMeter(meterLeftFill, meterLeftValue, meterLeftTrack, displayedLeft);
+        renderMeter(meterRightFill, meterRightValue, meterRightTrack, displayedRight);
+      }
+
+      meterAnimation = window.requestAnimationFrame(updateMeters);
+    }
+
+    function sendFrequency() {
+      if (!runtimeReady) return;
+      const value = Number(frequencySlider.value);
+      Module._rtaudio_webaudio_playsaw_set_frequency(value);
+      frequencyValue.textContent = `${value.toFixed(0)} Hz`;
+    }
+
+    function sendGain() {
+      if (!runtimeReady) return;
+      const value = Number(gainSlider.value);
+      Module._rtaudio_webaudio_playsaw_set_gain(value);
+      gainValue.textContent = value.toFixed(2);
+    }
+
+    updateIsolationStatus();
+
+    frequencySlider.addEventListener('input', sendFrequency);
+    gainSlider.addEventListener('input', sendGain);
+
+    var Module = {
+      print: (...args) => console.log(...args),
+      printErr: (...args) => console.error(...args),
+      async onRuntimeInitialized() {
+        try {
+          setStatus('Initializing WebAudio runtime…');
+          const AudioContextType = window.AudioContext || window.webkitAudioContext;
+          window.__rtaudioHostContext = new AudioContextType({
+            latencyHint: 'interactive'
+          });
+
+          await Module.RtAudioWeb.initialize({
+            context: window.__rtaudioHostContext
+          });
+
+          runtimeReady = true;
+          setStatus('Ready — host AudioContext adopted', 'ok');
+          detailsElement.textContent =
+            `host AudioContext sample rate: ${window.__rtaudioHostContext.sampleRate} Hz`;
+          startButton.disabled = false;
+          frequencySlider.disabled = false;
+          gainSlider.disabled = false;
+          sendFrequency();
+          sendGain();
+          updateBackendReadout();
+          backendPoll = window.setInterval(updateBackendReadout, 100);
+          meterAnimation = window.requestAnimationFrame(updateMeters);
+        } catch (error) {
+          console.error(error);
+          setStatus(`WebAudio initialization failed: ${error.message}`, 'warning');
+        }
+      }
+    };
+
+    startButton.addEventListener('click', () => {
+      const result = Module._rtaudio_webaudio_playsaw_start();
+      if (result === 0) {
+        const sampleRate = Module._rtaudio_webaudio_playsaw_sample_rate();
+        const bufferFrames = Module._rtaudio_webaudio_playsaw_buffer_frames();
+        setStatus('Playing', 'ok');
+        detailsElement.textContent =
+          `sample rate: ${sampleRate} Hz — render quantum: ${bufferFrames} frames — host-owned AudioContext`;
+        startButton.disabled = true;
+        stopButton.disabled = false;
+        updateBackendReadout();
+      } else if (result === 2) {
+        setStatus('AudioContext is still suspended. Click Start again.', 'warning');
+      } else {
+        setStatus('Unable to open the WebAudio stream. See the console.', 'warning');
+      }
+    });
+
+    stopButton.addEventListener('click', () => {
+      Module._rtaudio_webaudio_playsaw_stop();
+      setStatus('Stopped — stream/node kept open for restart');
+      detailsElement.textContent = 'The next Start reuses the same AudioWorkletNode and WebAudio graph.';
+      startButton.disabled = false;
+      stopButton.disabled = true;
+      displayedLeft = 0;
+      displayedRight = 0;
+      updateBackendReadout();
+    });
+
+    window.addEventListener('beforeunload', () => {
+      if (backendPoll !== 0)
+        window.clearInterval(backendPoll);
+      if (meterAnimation !== 0)
+        window.cancelAnimationFrame(meterAnimation);
+      if (typeof Module._rtaudio_webaudio_playsaw_stop === 'function')
+        Module._rtaudio_webaudio_playsaw_stop();
+      if (window.__rtaudioHostContext)
+        window.__rtaudioHostContext.close();
+    });
+  </script>
+
+  {{{ SCRIPT }}}
+</body>
+</html>
